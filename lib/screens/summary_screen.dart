@@ -13,8 +13,7 @@ class _SummaryScreenState extends State<SummaryScreen> {
 
   String summary = "";
   bool isLoading = false;
-
-  void summarizeText() async {
+void summarizeText() async {
   if (_controller.text.trim().isEmpty) return;
 
   setState(() {
@@ -25,7 +24,9 @@ class _SummaryScreenState extends State<SummaryScreen> {
     String prompt =
         "Summarize the following email in a short and clear way:\n\n${_controller.text}";
 
-    String aiResponse = await getAIResponse(prompt);
+    String aiResponse = await getAIResponseWithMemory([
+      {"role": "user", "text": prompt}
+    ]);
 
     setState(() {
       summary = aiResponse;
