@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'screens/dashboard_screen.dart';
 
-import 'screens/chat_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,7 +25,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'AI Assistant',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: const ChatScreen(),
+      home: const DashboardScreen(),
     );
   }
 }
