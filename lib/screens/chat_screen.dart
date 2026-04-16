@@ -16,9 +16,9 @@ Future<String> getAIResponseWithMemory(
     "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=$apiKey",
   );
 
-  // 🔥 Limit memory (important)
-  final recentMessages = messages.length > 10
-      ? messages.sublist(messages.length - 10)
+  // 🔥 Limit memory
+  final recentMessages = messages.length > 6
+      ? messages.sublist(messages.length - 6)
       : messages;
 
   final formattedMessages = recentMessages.map((msg) {
@@ -53,7 +53,6 @@ Map<String, dynamic>? parseEvent(String response) {
     if (start == -1 || end == -1) return null;
 
     String jsonString = response.substring(start, end + 1);
-
     return jsonDecode(jsonString);
   } catch (e) {
     return null;
@@ -75,17 +74,16 @@ class _ChatScreenState extends State<ChatScreen> {
   List<Map<String, String>> messages = [];
   bool isTyping = false;
 
-  /// ================== INIT ==================
+  /// INIT
   @override
   void initState() {
     super.initState();
     loadMessages();
   }
 
-  /// ================== LOAD HISTORY ==================
+  /// LOAD CHAT HISTORY
   void loadMessages() {
     final box = Hive.box('chatBox');
-
     final savedMessages = box.values.toList();
 
     setState(() {
@@ -93,7 +91,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  /// ================== SCROLL ==================
+  /// SCROLL
   void scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollController.animateTo(
@@ -104,14 +102,14 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  /// ================== SEND MESSAGE ==================
+  /// SEND MESSAGE
   void sendMessage() async {
     if (_controller.text.trim().isEmpty) return;
 
     String userMessage = _controller.text.trim();
     final chatBox = Hive.box('chatBox');
 
-    // ✅ Add user message
+    // ✅ USER MESSAGE
     setState(() {
       messages.add({"role": "user", "text": userMessage});
       isTyping = true;
@@ -120,6 +118,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await chatBox.add({
       "role": "user",
       "text": userMessage,
+      "time": DateTime.now().toIso8601String(),
     });
 
     _controller.clear();
@@ -171,6 +170,7 @@ Text: $userMessage
           await chatBox.add({
             "role": "ai",
             "text": "📅 Event extracted successfully!",
+            "time": DateTime.now().toIso8601String(),
           });
 
           setState(() {
@@ -180,6 +180,12 @@ Text: $userMessage
             });
           });
         } else {
+          await chatBox.add({
+            "role": "ai",
+            "text": "❌ Could not understand event",
+            "time": DateTime.now().toIso8601String(),
+          });
+
           setState(() {
             messages.add({
               "role": "ai",
@@ -188,6 +194,12 @@ Text: $userMessage
           });
         }
       } catch (e) {
+        await chatBox.add({
+          "role": "ai",
+          "text": "⚠️ Error processing event",
+          "time": DateTime.now().toIso8601String(),
+        });
+
         setState(() {
           messages.add({
             "role": "ai",
@@ -201,19 +213,26 @@ Text: $userMessage
       return;
     }
 
-    /// 🤖 NORMAL CHAT WITH MEMORY
+    /// 🤖 NORMAL CHAT
     try {
       String aiResponse = await getAIResponseWithMemory(messages);
 
       await chatBox.add({
         "role": "ai",
         "text": aiResponse,
+        "time": DateTime.now().toIso8601String(),
       });
 
       setState(() {
         messages.add({"role": "ai", "text": aiResponse});
       });
     } catch (e) {
+      await chatBox.add({
+        "role": "ai",
+        "text": "Something went wrong 😢",
+        "time": DateTime.now().toIso8601String(),
+      });
+
       setState(() {
         messages.add({
           "role": "ai",
@@ -226,7 +245,7 @@ Text: $userMessage
     scrollToBottom();
   }
 
-  /// ================== UI ==================
+  /// UI
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -237,10 +256,7 @@ Text: $userMessage
             icon: const Icon(Icons.delete),
             onPressed: () {
               Hive.box('chatBox').clear();
-
-              setState(() {
-                messages.clear();
-              });
+              setState(() => messages.clear());
             },
           )
         ],
@@ -317,7 +333,7 @@ Text: $userMessage
     );
   }
 
-  /// ================== CLEANUP ==================
+  /// CLEANUP
   @override
   void dispose() {
     _controller.dispose();

@@ -1,11 +1,84 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:fl_chart/fl_chart.dart';
+
 import 'chat_screen.dart';
 import 'schedule_screen.dart';
 import 'summary_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
+
+  /// 📊 REAL CHAT DATA (LAST 7 DAYS)
+  List<int> getChatData() {
+    final box = Hive.box('chatBox');
+
+    List<int> counts = List.filled(7, 0);
+    DateTime now = DateTime.now();
+
+    for (var msg in box.values) {
+      if (msg['time'] == null) continue;
+
+      DateTime msgTime = DateTime.parse(msg['time']);
+      int diff = now.difference(msgTime).inDays;
+
+      if (diff >= 0 && diff < 7) {
+        counts[6 - diff]++;
+      }
+    }
+
+    return counts;
+  }
+
+  /// 📈 BAR CHART
+  Widget buildChart() {
+    final data = getChatData();
+    final now = DateTime.now();
+
+    final days = List.generate(7, (index) {
+      final date = now.subtract(Duration(days: 6 - index));
+      return ["S", "M", "T", "W", "T", "F", "S"][date.weekday % 7];
+    });
+
+    return SizedBox(
+      height: 200,
+      child: BarChart(
+        BarChartData(
+          titlesData: FlTitlesData(
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                getTitlesWidget: (value, meta) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: Text(
+                      days[value.toInt()],
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  );
+                },
+              ),
+            ),
+            leftTitles: AxisTitles(
+              sideTitles: SideTitles(showTitles: true),
+            ),
+          ),
+          borderData: FlBorderData(show: false),
+          barGroups: List.generate(7, (index) {
+            return BarChartGroupData(
+              x: index,
+              barRods: [
+                BarChartRodData(
+                  toY: data[index].toDouble(),
+                  width: 16,
+                ),
+              ],
+            );
+          }),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -21,9 +94,8 @@ class DashboardScreen extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            /// 📊 STATS CARDS
+            /// 📊 STATS
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 _buildCard(
                   title: "Chats",
@@ -31,6 +103,7 @@ class DashboardScreen extends StatelessWidget {
                   icon: Icons.chat,
                   color: Colors.blue,
                 ),
+                const SizedBox(width: 10),
                 _buildCard(
                   title: "Events",
                   value: eventBox.length.toString(),
@@ -42,7 +115,7 @@ class DashboardScreen extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            /// 🚀 QUICK ACTIONS
+            /// 🚀 ACTIONS
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -85,7 +158,22 @@ class DashboardScreen extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            /// 📅 RECENT EVENTS
+            /// 📈 CHART
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                "Chat Activity (Last 7 Days)",
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+
+            const SizedBox(height: 10),
+
+            buildChart(),
+
+            const SizedBox(height: 20),
+
+            /// 📅 EVENTS
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -136,7 +224,6 @@ class DashboardScreen extends StatelessWidget {
   }) {
     return Expanded(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 5),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: color.withOpacity(0.1),
