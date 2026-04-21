@@ -3,63 +3,120 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+
 import 'summary_screen.dart';
 import 'schedule_screen.dart';
 
-/// ================== AI WITH MEMORY ==================
+// ─────────────────────────────────────────────
+//  HUGGING FACE INFERENCE API (OpenAI-compatible)
+//  Model: meta-llama/Llama-3.2-1B-Instruct
+//  Free tier supported ✅
+// ─────────────────────────────────────────────
+
+const String _groqUrl =
+    'https://api.groq.com/openai/v1/chat/completions';
+const String _groqModel = 'llama-3.3-70b-versatile';
+
 Future<String> getAIResponseWithMemory(
   List<Map<String, String>> messages,
 ) async {
-  final apiKey = dotenv.env['API_KEY'];
+  final apiKey = dotenv.env['GROQ_API_KEY'] ?? '';
 
-  final url = Uri.parse(
-    "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=$apiKey",
-  );
+  if (apiKey.isEmpty) {
+    return '❌ GROQ_API_KEY is missing in your .env file';
+  }
 
-  // 🔥 Limit memory
-  final recentMessages = messages.length > 6
-      ? messages.sublist(messages.length - 6)
-      : messages;
+  // Build OpenAI-style messages array
+  final List<Map<String, String>> apiMessages = [
+    {
+      'role': 'system',
+      'content':
+          'You are a helpful personal assistant. Be concise and friendly.',
+    }
+  ];
 
-  final formattedMessages = recentMessages.map((msg) {
-    return {
-      "role": msg["role"] == "user" ? "user" : "model",
-      "parts": [
-        {"text": msg["text"]}
-      ],
-    };
-  }).toList();
+  for (final msg in messages) {
+    final role = msg['role'] == 'user' ? 'user' : 'assistant';
+    final content = msg['text'] ?? '';
+    if (content.isEmpty) continue;
+    apiMessages.add({'role': role, 'content': content});
+  }
 
-  final response = await http.post(
-    url,
-    headers: {"Content-Type": "application/json"},
-    body: jsonEncode({
-      "contents": formattedMessages,
-    }),
-  );
+  if (apiMessages.length <= 1) {
+    return '⚠️ No valid message to send.';
+  }
 
-  final data = jsonDecode(response.body);
+  try {
+    final response = await http
+        .post(
+          Uri.parse(_groqUrl),
+          headers: {
+            'Authorization': 'Bearer $apiKey',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'model': _groqModel,
+            'messages': apiMessages,
+            'max_tokens': 500,
+            'temperature': 0.7,
+            'stream': false,
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
 
-  return data["candidates"]?[0]?["content"]?["parts"]?[0]?["text"] ??
-      "No response";
+    debugPrint('═══ HF status=${response.statusCode} ═══');
+
+    switch (response.statusCode) {
+      case 200:
+        final data = jsonDecode(response.body);
+        // OpenAI-compatible response format
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final content =
+              choices[0]['message']?['content'] as String? ?? '';
+          return content.trim().isNotEmpty
+              ? content.trim()
+              : '⚠️ Empty response';
+        }
+        debugPrint('HF unexpected body: ${response.body}');
+        return '⚠️ Unexpected response format';
+      case 401:
+        return '❌ Invalid HF token (401). Check HF_API_KEY in .env';
+      case 429:
+        return '⚠️ Rate limit hit. Please wait a moment and try again.';
+      case 503:
+        return '⏳ Model is loading, please try again in ~20 seconds.';
+      case 400:
+        debugPrint('HF 400: ${response.body}');
+        return '❌ Bad request (400): ${response.body}';
+      default:
+        debugPrint('HF error: ${response.body}');
+        return '❌ API Error ${response.statusCode}: ${response.body}';
+    }
+  } on Exception catch (e) {
+    debugPrint('HF exception: $e');
+    return '⚠️ Network error: $e';
+  }
 }
 
-/// ================== PARSER ==================
+// ─────────────────────────────────────────────
+//  PARSER  —  extract JSON event from AI text
+// ─────────────────────────────────────────────
 Map<String, dynamic>? parseEvent(String response) {
   try {
     final start = response.indexOf('{');
     final end = response.lastIndexOf('}');
-
-    if (start == -1 || end == -1) return null;
-
-    String jsonString = response.substring(start, end + 1);
-    return jsonDecode(jsonString);
-  } catch (e) {
+    if (start == -1 || end == -1 || end <= start) return null;
+    return jsonDecode(response.substring(start, end + 1))
+        as Map<String, dynamic>;
+  } catch (_) {
     return null;
   }
 }
 
-/// ================== CHAT SCREEN ==================
+// ─────────────────────────────────────────────
+//  CHAT SCREEN
+// ─────────────────────────────────────────────
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -70,274 +127,469 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final FocusNode _focusNode = FocusNode();
 
   List<Map<String, String>> messages = [];
   bool isTyping = false;
 
-  /// INIT
   @override
   void initState() {
     super.initState();
-    loadMessages();
+    _loadMessages();
   }
 
-  /// LOAD CHAT HISTORY
-  void loadMessages() {
+  @override
+  void dispose() {
+    _controller.dispose();
+    _scrollController.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _loadMessages() {
     final box = Hive.box('chatBox');
-    final savedMessages = box.values.toList();
+    final data = box.values
+        .map((e) => {
+              'role': e['role'].toString(),
+              'text': e['text'].toString(),
+            })
+        .toList();
+    setState(() => messages = List<Map<String, String>>.from(data));
+  }
 
-    setState(() {
-      messages = List<Map<String, String>>.from(savedMessages);
+  Future<void> _persistMessage(String role, String text) async {
+    await Hive.box('chatBox').add({
+      'role': role,
+      'text': text,
+      'time': DateTime.now().toIso8601String(),
     });
   }
 
-  /// SCROLL
-  void scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
+  void _scrollToBottom() {
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
     });
   }
 
-  /// SEND MESSAGE
-  void sendMessage() async {
-    if (_controller.text.trim().isEmpty) return;
+  Future<void> _sendMessage() async {
+    final userMessage = _controller.text.trim();
+    if (userMessage.isEmpty) return;
 
-    String userMessage = _controller.text.trim();
-    final chatBox = Hive.box('chatBox');
+    _controller.clear();
+    _focusNode.requestFocus();
 
-    // ✅ USER MESSAGE
     setState(() {
-      messages.add({"role": "user", "text": userMessage});
+      messages.add({'role': 'user', 'text': userMessage});
       isTyping = true;
     });
 
-    await chatBox.add({
-      "role": "user",
-      "text": userMessage,
-      "time": DateTime.now().toIso8601String(),
-    });
+    await _persistMessage('user', userMessage);
+    _scrollToBottom();
 
-    _controller.clear();
-    scrollToBottom();
-
-    /// 📧 SUMMARIZER
-    if (userMessage.toLowerCase().contains("summarize")) {
+    // ── route: summarize ──
+    if (userMessage.toLowerCase().contains('summarize')) {
       setState(() => isTyping = false);
-
+      if (!mounted) return;
       Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const SummaryScreen()),
-      );
+          context, MaterialPageRoute(builder: (_) => const SummaryScreen()));
       return;
     }
 
-    /// 📅 SCHEDULER
-    if (userMessage.toLowerCase().contains("schedule")) {
-      String prompt = """
-Extract event details from this text and return ONLY JSON like this:
-{
-  "title": "...",
-  "date": "YYYY-MM-DD",
-  "time": "HH:MM"
-}
+    // ── route: schedule ──
+    if (userMessage.toLowerCase().contains('schedule')) {
+      final prompt =
+          'Extract a calendar event from the text below and reply ONLY '
+          'with valid JSON, no explanation, no markdown.\n'
+          'JSON format exactly:\n'
+          '{\n'
+          '  "title": "<event title>",\n'
+          '  "date": "<YYYY-MM-DD>",\n'
+          '  "time": "<HH:MM>"\n'
+          '}\n'
+          'Text: $userMessage';
 
-Text: $userMessage
-""";
+      final aiResponse = await getAIResponseWithMemory(
+          [{'role': 'user', 'text': prompt}]);
+      final parsed = parseEvent(aiResponse);
 
-      try {
-        String aiResponse = await getAIResponseWithMemory([
-          {"role": "user", "text": prompt}
-        ]);
-
-        final parsed = parseEvent(aiResponse);
-
-        if (parsed != null) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ScheduleScreen(
-                preTitle: parsed["title"],
-                preDate: parsed["date"],
-                preTime: parsed["time"],
-              ),
+      String reply;
+      if (parsed != null) {
+        reply = '📅 Event created!';
+        if (!mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ScheduleScreen(
+              preTitle: parsed['title']?.toString(),
+              preDate: parsed['date']?.toString(),
+              preTime: parsed['time']?.toString(),
             ),
-          );
-
-          await chatBox.add({
-            "role": "ai",
-            "text": "📅 Event extracted successfully!",
-            "time": DateTime.now().toIso8601String(),
-          });
-
-          setState(() {
-            messages.add({
-              "role": "ai",
-              "text": "📅 Event extracted successfully!",
-            });
-          });
-        } else {
-          await chatBox.add({
-            "role": "ai",
-            "text": "❌ Could not understand event",
-            "time": DateTime.now().toIso8601String(),
-          });
-
-          setState(() {
-            messages.add({
-              "role": "ai",
-              "text": "❌ Could not understand event",
-            });
-          });
-        }
-      } catch (e) {
-        await chatBox.add({
-          "role": "ai",
-          "text": "⚠️ Error processing event",
-          "time": DateTime.now().toIso8601String(),
-        });
-
-        setState(() {
-          messages.add({
-            "role": "ai",
-            "text": "⚠️ Error processing event",
-          });
-        });
+          ),
+        );
+      } else {
+        reply =
+            '❌ Could not parse event. Try: "Schedule a meeting tomorrow at 3pm"';
       }
 
-      setState(() => isTyping = false);
-      scrollToBottom();
+      await _persistMessage('ai', reply);
+      setState(() {
+        messages.add({'role': 'ai', 'text': reply});
+        isTyping = false;
+      });
+      _scrollToBottom();
       return;
     }
 
-    /// 🤖 NORMAL CHAT
-    try {
-      String aiResponse = await getAIResponseWithMemory(messages);
+    // ── normal chat ──
+    final contextMessages = messages.length > 10
+        ? messages.sublist(messages.length - 10)
+        : messages;
 
-      await chatBox.add({
-        "role": "ai",
-        "text": aiResponse,
-        "time": DateTime.now().toIso8601String(),
-      });
+    final aiResponse = await getAIResponseWithMemory(contextMessages);
 
-      setState(() {
-        messages.add({"role": "ai", "text": aiResponse});
-      });
-    } catch (e) {
-      await chatBox.add({
-        "role": "ai",
-        "text": "Something went wrong 😢",
-        "time": DateTime.now().toIso8601String(),
-      });
-
-      setState(() {
-        messages.add({
-          "role": "ai",
-          "text": "Something went wrong 😢",
-        });
-      });
-    }
-
-    setState(() => isTyping = false);
-    scrollToBottom();
+    await _persistMessage('ai', aiResponse);
+    setState(() {
+      messages.add({'role': 'ai', 'text': aiResponse});
+      isTyping = false;
+    });
+    _scrollToBottom();
   }
 
-  /// UI
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("AI Assistant"),
+  void _clearChat() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear Chat'),
+        content: const Text('Delete all messages?'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.delete),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          TextButton(
             onPressed: () {
               Hive.box('chatBox').clear();
               setState(() => messages.clear());
+              Navigator.pop(ctx);
             },
-          )
-        ],
-      ),
-      body: Column(
-        children: [
-          /// CHAT LIST
-          Expanded(
-            child: ListView(
-              controller: _scrollController,
-              children: [
-                ...messages.map((msg) {
-                  final isUser = msg["role"] == "user";
-
-                  return Align(
-                    alignment: isUser
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(
-                          vertical: 5, horizontal: 10),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: isUser ? Colors.blue : Colors.grey.shade300,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        msg["text"]!,
-                        style: TextStyle(
-                          color: isUser ? Colors.white : Colors.black87,
-                        ),
-                      ),
-                    ),
-                  );
-                }).toList(),
-
-                if (isTyping)
-                  const Padding(
-                    padding: EdgeInsets.all(10),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text("AI is typing... 🤖"),
-                    ),
-                  ),
-              ],
-            ),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
           ),
-
-          /// INPUT
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            color: Colors.grey[200],
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    onSubmitted: (_) => sendMessage(),
-                    decoration: const InputDecoration(
-                      hintText: "Type a message...",
-                      border: InputBorder.none,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: sendMessage,
-                )
-              ],
-            ),
-          )
         ],
       ),
     );
   }
 
-  /// CLEANUP
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F7FA),
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
+        title: Row(
+          children: [
+            CircleAvatar(
+              radius: 16,
+              backgroundColor: theme.colorScheme.primary.withOpacity(0.15),
+              child: Icon(Icons.smart_toy_rounded,
+                  size: 18, color: theme.colorScheme.primary),
+            ),
+            const SizedBox(width: 10),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('AI Assistant',
+                    style: TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600)),
+                Text('Powered by Groq',
+                    style: TextStyle(fontSize: 10, color: Colors.grey)),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: Colors.grey),
+            tooltip: 'Clear chat',
+            onPressed: _clearChat,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty && !isTyping
+                ? const _EmptyState()
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    itemCount: messages.length + (isTyping ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == messages.length && isTyping) {
+                        return const _TypingIndicator();
+                      }
+                      final msg = messages[index];
+                      return _MessageBubble(
+                        text: msg['text']!,
+                        isUser: msg['role'] == 'user',
+                      );
+                    },
+                  ),
+          ),
+          _InputBar(
+            controller: _controller,
+            focusNode: _focusNode,
+            isTyping: isTyping,
+            onSend: _sendMessage,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+//  SUB-WIDGETS
+// ─────────────────────────────────────────────
+
+class _MessageBubble extends StatelessWidget {
+  final String text;
+  final bool isUser;
+  const _MessageBubble({required this.text, required this.isUser});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.78),
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: isUser
+              ? Theme.of(context).colorScheme.primary
+              : Colors.white,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(18),
+            topRight: const Radius.circular(18),
+            bottomLeft: Radius.circular(isUser ? 18 : 4),
+            bottomRight: Radius.circular(isUser ? 4 : 18),
+          ),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 6,
+                offset: const Offset(0, 2))
+          ],
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: isUser ? Colors.white : Colors.black87,
+            fontSize: 14.5,
+            height: 1.4,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TypingIndicator extends StatelessWidget {
+  const _TypingIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(18),
+            topRight: Radius.circular(18),
+            bottomRight: Radius.circular(18),
+            bottomLeft: Radius.circular(4),
+          ),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 6,
+                offset: const Offset(0, 2))
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (i) => _Dot(delay: i * 200)),
+        ),
+      ),
+    );
+  }
+}
+
+class _Dot extends StatefulWidget {
+  final int delay;
+  const _Dot({required this.delay});
+
+  @override
+  State<_Dot> createState() => _DotState();
+}
+
+class _DotState extends State<_Dot> with SingleTickerProviderStateMixin {
+  late final AnimationController _ac;
+  late final Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ac = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 600))
+      ..repeat(reverse: true);
+    _anim = CurvedAnimation(parent: _ac, curve: Curves.easeInOut);
+    Future.delayed(Duration(milliseconds: widget.delay), () {
+      if (mounted) _ac.forward();
+    });
+  }
+
   @override
   void dispose() {
-    _controller.dispose();
-    _scrollController.dispose();
+    _ac.dispose();
     super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _anim,
+      builder: (_, __) => Container(
+        width: 7,
+        height: 7,
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        decoration: BoxDecoration(
+          color: Colors.grey.withOpacity(0.4 + 0.5 * _anim.value),
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.chat_bubble_outline_rounded,
+              size: 56, color: Colors.grey.shade300),
+          const SizedBox(height: 14),
+          Text('Start a conversation',
+              style: TextStyle(
+                  color: Colors.grey.shade400,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          Text('Try "Schedule a meeting" or ask anything',
+              style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
+class _InputBar extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool isTyping;
+  final VoidCallback onSend;
+
+  const _InputBar({
+    required this.controller,
+    required this.focusNode,
+    required this.isTyping,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 8,
+                offset: const Offset(0, -2))
+          ],
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0F2F5),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  onSubmitted: (_) => onSend(),
+                  enabled: !isTyping,
+                  maxLines: 4,
+                  minLines: 1,
+                  textInputAction: TextInputAction.send,
+                  decoration: const InputDecoration(
+                    hintText: 'Type a message…',
+                    border: InputBorder.none,
+                    hintStyle: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            isTyping
+                ? const SizedBox(
+                    width: 42,
+                    height: 42,
+                    child: Padding(
+                      padding: EdgeInsets.all(10),
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : InkWell(
+                    onTap: onSend,
+                    borderRadius: BorderRadius.circular(24),
+                    child: Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.send_rounded,
+                          color: Colors.white, size: 18),
+                    ),
+                  ),
+          ],
+        ),
+      ),
+    );
   }
 }
