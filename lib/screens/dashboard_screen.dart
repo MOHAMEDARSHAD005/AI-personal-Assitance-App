@@ -9,6 +9,8 @@ import 'summary_screen.dart';
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
 
+
+
   /// 📊 REAL CHAT DATA (LAST 7 DAYS)
   List<int> getChatData() {
     final box = Hive.box('chatBox');
@@ -59,19 +61,14 @@ class DashboardScreen extends StatelessWidget {
                 },
               ),
             ),
-            leftTitles: AxisTitles(
-              sideTitles: SideTitles(showTitles: true),
-            ),
+            leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true)),
           ),
           borderData: FlBorderData(show: false),
           barGroups: List.generate(7, (index) {
             return BarChartGroupData(
               x: index,
               barRods: [
-                BarChartRodData(
-                  toY: data[index].toDouble(),
-                  width: 16,
-                ),
+                BarChartRodData(toY: data[index].toDouble(), width: 16),
               ],
             );
           }),
@@ -84,12 +81,10 @@ class DashboardScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final chatBox = Hive.box('chatBox');
     final eventBox = Hive.box('eventsBox');
+    final taskBox = Hive.box('tasksBox');
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("Dashboard"),
-        centerTitle: true,
-      ),
+      appBar: AppBar(title: const Text("Dashboard"), centerTitle: true),
 
       /// ✅ FIXED BODY
       body: SafeArea(
@@ -98,7 +93,6 @@ class DashboardScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-
               /// 📊 STATS
               Row(
                 children: [
@@ -107,6 +101,12 @@ class DashboardScreen extends StatelessWidget {
                     value: chatBox.length.toString(),
                     icon: Icons.chat,
                     color: Colors.blue,
+                  ),
+                  _buildCard(
+                    title: "Tasks",
+                    value: taskBox.length.toString(),
+                    icon: Icons.check_circle,
+                    color: Colors.orange,
                   ),
                   const SizedBox(width: 10),
                   _buildCard(
@@ -121,8 +121,10 @@ class DashboardScreen extends StatelessWidget {
               const SizedBox(height: 20),
 
               /// 🚀 ACTIONS
-              Text("Quick Actions",
-                  style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                "Quick Actions",
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
 
               const SizedBox(height: 10),
 
@@ -159,8 +161,10 @@ class DashboardScreen extends StatelessWidget {
               const SizedBox(height: 20),
 
               /// 📈 CHART
-              Text("Chat Activity (Last 7 Days)",
-                  style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                "Chat Activity (Last 7 Days)",
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
 
               const SizedBox(height: 10),
 
@@ -169,8 +173,10 @@ class DashboardScreen extends StatelessWidget {
               const SizedBox(height: 20),
 
               /// 📅 EVENTS
-              Text("Recent Events",
-                  style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                "Recent Events",
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
 
               const SizedBox(height: 10),
 
@@ -192,8 +198,7 @@ class DashboardScreen extends StatelessWidget {
                         return ListTile(
                           leading: const Icon(Icons.event),
                           title: Text(event['title']),
-                          subtitle:
-                              Text("${event['date']} • ${event['time']}"),
+                          subtitle: Text("${event['date']} • ${event['time']}"),
                         );
                       },
                     );
@@ -227,10 +232,7 @@ class DashboardScreen extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               value,
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-              ),
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             Text(title),
           ],
